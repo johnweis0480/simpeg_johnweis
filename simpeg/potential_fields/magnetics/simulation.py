@@ -22,7 +22,6 @@ from simpeg.utils.solver_utils import get_default_solver
 
 from ...base import BaseMagneticPDESimulation
 from ..base import BaseEquivalentSourceLayerSimulation, BasePFSimulation
-from .analytics import CongruousMagBC
 from .survey import Survey
 
 from ._numba_functions import (
