@@ -494,7 +494,8 @@ class ProlateEllispse():
 
         return g
 
-def get_mesh():
+@pytest.fixture
+def mesh():
 
     dhx, dhy, dhz = 50., 50., 50.  # minimum cell width (base mesh cell width)
     nbcx = 512  # number of base mesh cells in x
@@ -505,16 +506,16 @@ def get_mesh():
     hx = dhx * np.ones(nbcx)
     hy = dhy * np.ones(nbcy)
     hz = dhz * np.ones(nbcz)
-    mesh = discretize.TreeMesh([hx, hy, hz], x0='CCC')
+    _mesh = discretize.TreeMesh([hx, hy, hz], x0='CCC')
 
     xp, yp, zp = np.meshgrid([-1400., 1400.], [-1400., 1400.], [-1000., 200.])
     xy = np.c_[mkvc(xp), mkvc(yp), mkvc(zp)]
-    mesh = refine_tree_xyz(
-        mesh, xy, method='box', finalize=False, octree_levels=[1, 1, 1,1],
+    _mesh = refine_tree_xyz(
+        _mesh, xy, method='box', finalize=False, octree_levels=[1, 1, 1,1],
     )
-    mesh.finalize()
+    _mesh.finalize()
 
-    return mesh
+    return _mesh
 
 def get_survey(components = ['bx','by','bz']):
     ccx = np.linspace(-1400, 1400, num=57)
@@ -525,12 +526,12 @@ def get_survey(components = ['bx','by','bz']):
                                          components=components)
     inducing_field = [55000.0, 60., 90.]
     srcField = PF.magnetics.sources.UniformBackgroundField([rxLoc], inducing_field[0],inducing_field[1],inducing_field[2])
-    survey = PF.magnetics.survey.Survey(srcField)
+    _survey = PF.magnetics.survey.Survey(srcField)
 
-    return survey
+    return _survey
 
 @pytest.mark.parametrize("model_type", ("mu_rem", "mu","rem"))
-def test_forward(model_type):
+def test_forward(model_type,mesh):
     '''
     Test against the analytic solution for an ellipse with
     uniform intrinsic remanence and susceptibility in a
@@ -538,8 +539,7 @@ def test_forward(model_type):
     '''
     tol=.1
 
-    mesh=get_mesh()
-    survey=get_survey()
+    survey = get_survey()
 
     amplitude = survey.source_field.amplitude
     inclination = survey.source_field.inclination
@@ -605,7 +605,7 @@ def test_forward(model_type):
 
     assert err  < tol
 
-def test_TMI_approximate_exact():
+def test_exact_tmi(mesh):
     '''
     Test against the analytic solution for an ellipse with
     uniform intrinsic remanence and susceptibility in a
@@ -613,7 +613,6 @@ def test_TMI_approximate_exact():
     '''
     tol=1e-8
 
-    mesh=get_mesh()
     survey=get_survey(components=['bx','by','bz','tmi'])
 
     amplitude = survey.source_field.amplitude
@@ -648,48 +647,29 @@ def test_TMI_approximate_exact():
 
     u0_Mr_model = mkvc(np.array([Rx,Ry,Rz]).T)
 
-    simulation_approx = PF.magnetics.simulation.Simulation3DDifferential(
+    simulation = PF.magnetics.simulation.Simulation3DDifferential(
         survey=survey,
         mesh=mesh,
         mu=mu_model,
         rem=u0_Mr_model,
     )
 
-    dpred_numeric_approx=simulation_approx.dpred()
+    dpred_numeric = simulation.dpred()
 
-    survey = get_survey(components=['tmi_exact'])
-    simulation_exact = PF.magnetics.simulation.Simulation3DDifferential(
-        survey=survey,
-        mesh=mesh,
-        mu=mu_model,
-        rem=u0_Mr_model,
-    )
-
-    dpred_TMI_exact = simulation_exact.dpred()
-
-    dpred_fields = np.reshape(dpred_numeric_approx[:survey.nRx * 3], (3, survey.nRx)).T
-    dpred_TMI_approx = dpred_numeric_approx[survey.nRx * 3:]
+    dpred_fields = np.reshape(dpred_numeric[:survey.nRx * 4], (4, survey.nRx)).T
 
     B0 = survey.source_field.b0
-    B0_hat = B0 / amplitude
 
-    TMI_approx_analytic = dpred_fields @ B0_hat
-    TMI_exact_analytic = np.linalg.norm(dpred_fields+B0,axis=1)-amplitude
+    TMI_exact_analytic = np.linalg.norm(dpred_fields[:,:3]+B0,axis=1)-amplitude
+    dpred_TMI_exact = dpred_fields[:,3]
 
-    TMI_num_diff = np.max(np.abs(dpred_TMI_exact - dpred_TMI_approx))
-    TMI_approx_err = np.max(np.abs(dpred_TMI_approx-TMI_approx_analytic))
     TMI_exact_err = np.max(np.abs(dpred_TMI_exact - TMI_exact_analytic))
 
-    assert TMI_num_diff > tol
-    assert TMI_approx_err < tol
     assert TMI_exact_err < tol
-    print("\nmax(TMI_exact - TMI_approx) = " + "{:.{}f}".format(TMI_num_diff, 2) + ', tol = ' + str(tol))
-    print("max(TMI_approx_err) = " + "{:.{}e}".format(TMI_approx_err, 2) + ', tol = ' + str(tol))
     print("max(TMI_exact_err) = " + "{:.{}e}".format(TMI_exact_err, 2) + ', tol = ' + str(tol))
 
-def test_differential_magnetization_against_integral():
+def test_differential_magnetization_against_integral(mesh):
 
-    mesh = get_mesh()
     survey = get_survey()
 
     amplitude = survey.source_field.amplitude

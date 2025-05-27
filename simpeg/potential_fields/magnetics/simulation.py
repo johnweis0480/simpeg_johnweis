@@ -1526,7 +1526,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     mesh : discretize.base.BaseMesh
     survey : magnetics.suvey.Survey
     mu : float, array_like
-        Magnetic Permeability Model (C/(s m^3)). Set this for forward
+        Magnetic Permeability Model (H/ m). Set this for forward
         modeling or to fix while inverting for remanence. This is used if
         muMap == None
     rem : float, array_like
@@ -1548,16 +1548,14 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     This simulation solves for the magnetostatic PDE:
     \nabla \cdot \Vec{B} = 0
 
-    where the constitutive relation is defined as:
+    where the constitutive relation is specified as:
     \Vec{B} = \mu\Vec{H} + \mu_0\Vec{M_r}
 
     where \Vec{M_r} is a fixed magnetization unaffected by the inducing field
     and \mu\Vec{H} is the induced magnetization
     """
 
-    _Jmatrix = None
     _Ainv = None
-    _stored_fields = None
 
     rem, remMap, remDeriv = props.Invertible(
         "Magnetic Polarization (nT)", optional=True
@@ -1579,15 +1577,6 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         super().__init__(mesh=mesh, survey=survey, mu=mu, muMap=muMap, **kwargs)
 
-        if (
-            muMap is None
-            and np.isscalar(mu)
-            and np.allclose(mu, mu_0)
-            and storeJ is True
-        ):
-            self._update_J = False
-        else:
-            self._update_J = True
 
         self.rem = rem
         self.remMap = remMap
@@ -1602,6 +1591,10 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         )(np.ones(self.mesh.n_faces))
 
         self.solver_opts = {"is_symmetric": True, "is_positive_definite": True}
+
+        self._Jmatrix = None
+        self.__stored_fields = None
+        self._B0 = self.getB0()
 
     @property
     def survey(self):
@@ -1621,21 +1614,21 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             value = validate_type("survey", value, Survey, cast=False)
         self._survey = value
 
+
     @property
     def storeJ(self):
+        """Whether to store the sensitivity matrix
+
+        Returns
+        -------
+        bool
+        """
         return self._storeJ
 
     @storeJ.setter
     def storeJ(self, value):
         self._storeJ = validate_type("storeJ", value, bool)
 
-    @property
-    def exact_TMI(self):
-        return self._exact_TMI
-
-    @exact_TMI.setter
-    def exact_TMI(self, value):
-        self._exact_TMI = validate_type("exact_TMI", value, bool)
 
     @utils.requires("survey")
     def getB0(self):
@@ -1647,14 +1640,25 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         ]
         return B0
 
+    @property
+    def _stored_fields(self):
+        return self.__stored_fields
+
+    @_stored_fields.setter
+    def _stored_fields(self, value):
+        self.__stored_fields = value
+
+    @_stored_fields.deleter
+    def _stored_fields(self):
+        self.__stored_fields = None
+
     def getRHS(self, m):
         self.model = m
 
         rhs = 0
 
         if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
-            B0 = self.getB0()
-            rhs += self._Div * self.MfMuiI * self._MfMu0i * B0 - self._Div * B0
+            rhs += self._Div * self.MfMuiI * self._MfMu0i * self._B0 - self._Div * self._B0
 
         if self.rem is not None:
             mu = self.mu * np.ones(self.mesh.n_cells)
@@ -1672,7 +1676,8 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         return self._Div * self.MfMuiI * self._DivT
 
     def fields(self, m):
-        self.model = m
+        #TODO Other differential codes have fields object, I dont think we need that here since there is only one source
+        self.model=m
 
         if self._stored_fields is None:
 
@@ -1685,8 +1690,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             B = -self.MfMuiI * self._DivT * u
 
             if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
-                B0 = self.getB0()
-                B += self._MfMu0i * self.MfMuiI * B0 - B0
+                B += self._MfMu0i * self.MfMuiI * self._B0 - self._B0
 
             if self.rem is not None:
                 mu = self.mu * np.ones(self.mesh.n_cells)
@@ -1703,7 +1707,9 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         return fields
 
+
     def dpred(self, m=None, f=None):
+        self.model=m
         if f is not None:
             return self.projectFields(f)
 
@@ -1714,7 +1720,24 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         return dpred
 
-    def Magnetization(self, m):
+    def Magnetic_Polarization(self, m):
+        r"""
+        Computes the total magnetic polarization :math:`\mu_0\mathbf{M}`.
+
+        Parameters
+        ----------
+        m : (n_param,) numpy.ndarray
+            The model parameters.
+
+        Returns
+        -------
+        mu0_M : np.ndarray
+            The magnetic polarization μ₀ * M in nanoteslas (nT), defined on the mesh faces.
+            The result is ordered as a concatenation of the x, y, and z face components
+            (i.e., [Mx_faces, My_faces, Mz_faces]).
+
+
+        """
         self.model = m
 
         self._Ainv = self.solver(self.getA(m), **self.solver_opts)
@@ -1725,8 +1748,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         B = -self.MfMuiI * self._DivT * u
 
         if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
-            B0 = self.getB0()
-            B += self._MfMu0i * self.MfMuiI * B0 - B0
+            B += self._MfMu0i * self.MfMuiI * self._B0 - self._B0
 
         if self.rem is not None:
             mu = self.mu * np.ones(self.mesh.n_cells)
@@ -1739,35 +1761,34 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         mu0_M = B - mu0_H
 
         return mu0_M
+
     def Jvec(self, m, v, f=None):
         self.model = m
+
+        if f is None:
+            f = self.fields(m)
 
         if self.storeJ:
             J = self.getJ(m, f=f)
             return J.dot(v)
 
-        self.model = m
-
-        if f is None:
-            f = self.fields(m)
 
         return self._Jvec(m, v, f)
 
     def Jtvec(self, m, v, f=None):
         self.model = m
 
+        if f is None:
+            f = self.fields(m)
+
         if self.storeJ:
             J = self.getJ(m, f=f)
             return np.asarray(J.T.dot(v))
 
-        self.model = m
-
-        if f is None:
-            f = self.fields(m)
-
         return self._Jtvec(m, v, f)
 
     def getJ(self, m, f=None):
+        self.model=m
         if self._Jmatrix is None:
             if f is None:
                 f = self.fields(m)
@@ -1789,7 +1810,6 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         Q = self.projectFieldsDeriv(B)
 
-        B0 = self.getB0()
         if v is None:
             v = np.eye(Q.shape[0])
             DivTatsol_p_QT = (
@@ -1815,7 +1835,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         if self.muMap is not None:
             Jtv += self.MfMuiIDeriv(self._DivT * u, -DivTatsol_p_QT, adjoint=True)
-            Jtv += self.MfMuiIDeriv(B0, self._MfMu0i.T * (DivTatsol_p_QT), adjoint=True)
+            Jtv += self.MfMuiIDeriv(self._B0, self._MfMu0i.T * (DivTatsol_p_QT), adjoint=True)
 
             if self.rem is not None:
                 Mf_r_over_uvec = self.mesh.get_face_inner_product(
@@ -1845,7 +1865,6 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         B, u = f["B"], f["u"]
 
         Q = self.projectFieldsDeriv(B)
-        B0 = self.getB0()
         C = -self.MfMuiI * self._DivT
 
         db_dm = 0
@@ -1860,7 +1879,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         if self.muMap is not None:
             dCmu_dm += self.MfMuiIDeriv(self._DivT @ u, v, adjoint=False)
-            db_dm += self._MfMu0i * self.MfMuiIDeriv(B0, v, adjoint=False)
+            db_dm += self._MfMu0i * self.MfMuiIDeriv(self._B0, v, adjoint=False)
 
             if self.rem is not None:
                 Mf_r_over_uvec = self.mesh.get_face_inner_product(
@@ -1908,18 +1927,21 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             )
         return self._Qfz
 
-    def projectFields(self, u):
+    def projectFields(self, f):
+        #Todo Other classes have derivatives and projections built into fields, I dont think we need that
+        # - its more clean to me to have everything here so the user can easily see whats going on
+        # - Here, the data is stacked bx,by,bz,tmi... I and others have found the other ordering confusing
         components = self.survey.components
 
         fields = {}
 
 
         if "bx" in components or "tmi" in components:
-            fields["bx"] = self.Qfx * u["B"]
+            fields["bx"] = self.Qfx * f["B"]
         if "by" in components or "tmi" in components:
-            fields["by"] = self.Qfy * u["B"]
+            fields["by"] = self.Qfy * f["B"]
         if "bz" in components or "tmi" in components:
-            fields["bz"] = self.Qfz * u["B"]
+            fields["bz"] = self.Qfz * f["B"]
 
         B0 = self.survey.source_field.b0
 
@@ -1958,53 +1980,36 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             B0 = self.survey.source_field.b0
             Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
 
-            if self.exact_TMI:
-                if not self._update_J and self._Jmatrix is None:
-                    return sp.vstack((self.Qfx, self.Qfy, self.Qfz))
+            box = B0[0]
+            boy = B0[1]
+            boz = B0[2]
 
-                box = B0[0]
-                boy = B0[1]
-                boz = B0[2]
+            bx = self.Qfx * Bs
+            by = self.Qfy * Bs
+            bz = self.Qfz * Bs
 
-                bx = self.Qfx * Bs
-                by = self.Qfy * Bs
-                bz = self.Qfz * Bs
+            dpred = (
+                np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
+            )
 
-                dpred = (
-                    np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
-                )
+            dDhalf_dD = sdiag(1 / (dpred + Bot))
 
-                dDhalf_dD = sdiag(1 / (dpred + Bot))
+            xterm = sdiag(box + bx) * self.Qfx
+            yterm = sdiag(boy + by) * self.Qfy
+            zterm = sdiag(boz + bz) * self.Qfz
 
-                xterm = sdiag(box + bx) * self.Qfx
-                yterm = sdiag(boy + by) * self.Qfy
-                zterm = sdiag(boz + bz) * self.Qfz
+            fields["tmi"] = dDhalf_dD * (xterm + yterm + zterm)
 
-                fields["tmi"] = dDhalf_dD * (xterm + yterm + zterm)
-
-            else:
-                bx = fields["bx"]
-                by = fields["by"]
-                bz = fields["bz"]
-                B0 = self.survey.source_field.b0
-                Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
-                box = B0[0] / Bot
-                boy = B0[1] / Bot
-                boz = B0[2] / Bot
-                fields["tmi"] = bx * box + by * boy + bz * boz
 
         return sp.vstack([fields[comp] for comp in components])
 
     @property
-    def deleteTheseOnModelUpdate(self):
-        toDelete = super().deleteTheseOnModelUpdate
+    def _delete_on_model_update(self):
+        toDelete = super()._delete_on_model_update
         if self._stored_fields is not None:
             toDelete = toDelete + ["_stored_fields"]
         if self._Ainv is not None:
             toDelete = toDelete + ["_Ainv"]
-        if self._update_J:
-            if self._Jmatrix is not None:
-                toDelete = toDelete + ["_Jmatrix"]
         return toDelete
 
     @property

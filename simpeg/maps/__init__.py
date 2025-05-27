@@ -14,6 +14,7 @@ from ._property_maps import (
     ChiMap,
     ComplexMap,
     ExpMap,
+    ESusMap,
     LogisticSigmoidMap,
     LogMap,
     MuRelative,
