@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 from numpy.typing import NDArray
 import scipy.sparse as sp
+from functools import cached_property
 from geoana.kernels import (
     prism_fxxy,
     prism_fxxz,
@@ -1541,6 +1542,8 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         to invert for `mu_0*M`.
     storeJ: bool
         Whether to store the sensitivity matrix. If set to True
+    use_float32_solver: bool
+        Whether to solve Ainv*rhs using float32 precision.
 
 
     Notes
@@ -1570,6 +1573,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         remMap=None,
         muMap=None,
         storeJ=False,
+        use_float32_solver=False,
         **kwargs
     ):
         if mu is None:
@@ -1582,6 +1586,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         self.remMap = remMap
 
         self.storeJ = storeJ
+        self.use_float32_solver = use_float32_solver
 
         self._MfMu0i = self.mesh.get_face_inner_product(1.0 / mu_0)
         self._Div = self.Mcc * self.mesh.face_divergence
@@ -1593,8 +1598,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         self.solver_opts = {"is_symmetric": True, "is_positive_definite": True}
 
         self._Jmatrix = None
-        self.__stored_fields = None
-        self._B0 = self.getB0()
+        self._stored_fields = None
 
     @property
     def survey(self):
@@ -1629,9 +1633,24 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     def storeJ(self, value):
         self._storeJ = validate_type("storeJ", value, bool)
 
+    @property
+    def use_float32_solver(self):
+        """Whether to solve Ainv*rhs using float32 precision.
 
+        Returns
+        -------
+        bool
+        """
+        return self._use_float32_solver
+
+    @use_float32_solver.setter
+    def use_float32_solver(self, value):
+        self._use_float32_solver = validate_type("use_float32_solver", value, bool)
+
+
+    @cached_property
     @utils.requires("survey")
-    def getB0(self):
+    def _B0(self):
         b0 = self.survey.source_field.b0
         B0 = np.r_[
             b0[0] * np.ones(self.mesh.nFx),
@@ -1652,7 +1671,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     def _stored_fields(self):
         self.__stored_fields = None
 
-    def getRHS(self, m):
+    def _getRHS(self, m):
         self.model = m
 
         rhs = 0
@@ -1672,19 +1691,23 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         return rhs
 
-    def getA(self, m):
-        return self._Div * self.MfMuiI * self._DivT
+    def _getA(self):
+        A = (self._Div * self.MfMuiI * self._DivT)
+
+        if self.use_float32_solver:
+            A = A.astype(np.float32)
+
+        return A
 
     def fields(self, m):
-        #TODO Other differential codes have fields object, I dont think we need that here since there is only one source
         self.model=m
 
         if self._stored_fields is None:
 
             if self._Ainv is None:
-                self._Ainv = self.solver(self.getA(m), **self.solver_opts)
+                self._Ainv = self.solver(self._getA(), **self.solver_opts)
 
-            rhs = self.getRHS(m)
+            rhs = self._getRHS(m)
 
             u = self._Ainv * rhs
             B = -self.MfMuiI * self._DivT * u
@@ -1711,12 +1734,12 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     def dpred(self, m=None, f=None):
         self.model=m
         if f is not None:
-            return self.projectFields(f)
+            return self._projectFields(f)
 
         if f is None:
             f = self.fields(m)
 
-        dpred = self.projectFields(f)
+        dpred = self._projectFields(f)
 
         return dpred
 
@@ -1742,7 +1765,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         self._Ainv = self.solver(self.getA(m), **self.solver_opts)
 
-        rhs = self.getRHS(m)
+        rhs = self._getRHS(m)
 
         u = self._Ainv * rhs
         B = -self.MfMuiI * self._DivT * u
@@ -1805,10 +1828,10 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         return J
 
-    def _Jtvec(self, m, v, f=None):
+    def _Jtvec(self, m, v, f):
         B, u = f["B"], f["u"]
 
-        Q = self.projectFieldsDeriv(B)
+        Q = self._projectFieldsDeriv(B)
 
         if v is None:
             v = np.eye(Q.shape[0])
@@ -1857,14 +1880,14 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         return Jtv
 
 
-    def _Jvec(self, m, v, f=None):
+    def _Jvec(self, m, v,f):
 
         if v is None:
             v = np.eye(m.shape[0])
 
         B, u = f["B"], f["u"]
 
-        Q = self.projectFieldsDeriv(B)
+        Q = self._projectFieldsDeriv(B)
         C = -self.MfMuiI * self._DivT
 
         db_dm = 0
@@ -1903,120 +1926,127 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         return Jv
 
-    @property
-    def Qfx(self):
-        if getattr(self, "_Qfx", None) is None:
-            self._Qfx = self.mesh.get_interpolation_matrix(
-                self.survey.receiver_locations, "Fx"
-            )
-        return self._Qfx
+    @cached_property
+    def _Qfx(self):
+        Qfx = self.mesh.get_interpolation_matrix(
+            self.survey.receiver_locations, "Fx"
+        )
+        return Qfx
 
-    @property
-    def Qfy(self):
-        if getattr(self, "_Qfy", None) is None:
-            self._Qfy = self.mesh.get_interpolation_matrix(
-                self.survey.receiver_locations, "Fy"
-            )
-        return self._Qfy
+    @cached_property
+    def _Qfy(self):
+        Qfy = self.mesh.get_interpolation_matrix(
+            self.survey.receiver_locations, "Fy"
+        )
+        return Qfy
 
-    @property
-    def Qfz(self):
-        if getattr(self, "_Qfz", None) is None:
-            self._Qfz = self.mesh.get_interpolation_matrix(
-                self.survey.receiver_locations, "Fz"
-            )
-        return self._Qfz
+    @cached_property
+    def _Qfz(self):
+        Qfz = self.mesh.get_interpolation_matrix(
+            self.survey.receiver_locations, "Fz"
+        )
+        return Qfz
 
-    def projectFields(self, f):
-        #Todo Other classes have derivatives and projections built into fields, I dont think we need that
-        # - its more clean to me to have everything here so the user can easily see whats going on
-        # - Here, the data is stacked bx,by,bz,tmi... I and others have found the other ordering confusing
+    def _projectFields(self, f):
+
         components = self.survey.components
 
-        fields = {}
 
-
-        if "bx" in components or "tmi" in components:
-            fields["bx"] = self.Qfx * f["B"]
-        if "by" in components or "tmi" in components:
-            fields["by"] = self.Qfy * f["B"]
-        if "bz" in components or "tmi" in components:
-            fields["bz"] = self.Qfz * f["B"]
-
+        bx = self._Qfx * f["B"]
+        by = self._Qfy * f["B"]
+        bz = self._Qfz * f["B"]
         B0 = self.survey.source_field.b0
 
         if "tmi" in components:
-
-            Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
-            box = B0[0]
-            boy = B0[1]
-            boz = B0[2]
-            fields["tmi"] = (
-                np.sqrt(
-                    (fields["bx"] + box) ** 2
-                    + (fields["by"] + boy) ** 2
-                    + (fields["bz"] + boz) ** 2
-                )
-                - Bot
+            tmi = (
+                    np.sqrt(
+                        (bx + B0[0]) ** 2
+                        + (by + B0[1]) ** 2
+                        + (bz + B0[2]) ** 2
+                    )
+                    - np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
             )
 
+        rx_list = self.survey.source_field.receiver_list
+        n_total = 0
+        total_data_list = []
+        for rx in rx_list:
+            data = {}
+            rx_n_locs = rx.locations.shape[0]
+            if "bx" in rx.components:
+                data["bx"] = bx[n_total:n_total + rx_n_locs]
+            if "by" in rx.components:
+                data["by"] = by[n_total:n_total + rx_n_locs]
+            if "bz" in rx.components:
+                data["bz"] = bz[n_total:n_total + rx_n_locs]
+            if "tmi" in rx.components:
+                data["tmi"] = tmi[n_total:n_total + rx_n_locs]
 
-        return np.concatenate([fields[comp] for comp in components])
+            n_total += rx_n_locs
+
+            total_data_list.append(np.concatenate([data[comp] for comp in rx.components]))
+
+        if len(total_data_list) == 1:
+            return total_data_list[0]
+
+        return np.concatenate(total_data_list,axis=0)
 
     @utils.count
-    def projectFieldsDeriv(self, Bs):
+    def _projectFieldsDeriv(self, Bs):
         components = self.survey.components
 
-        fields = {}
-
-        if "bx" in components or "tmi" in components:
-            fields["bx"] = self.Qfx
-        if "by" in components or "tmi" in components:
-            fields["by"] = self.Qfy
-        if "bz" in components or "tmi" in components:
-            fields["bz"] = self.Qfz
 
         if "tmi" in components:
             B0 = self.survey.source_field.b0
             Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
 
-            box = B0[0]
-            boy = B0[1]
-            boz = B0[2]
-
-            bx = self.Qfx * Bs
-            by = self.Qfy * Bs
-            bz = self.Qfz * Bs
+            bx = self._Qfx * Bs
+            by = self._Qfy * Bs
+            bz = self._Qfz * Bs
 
             dpred = (
-                np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
+                np.sqrt((bx + B0[0]) ** 2 + (by + B0[1]) ** 2 + (bz + B0[2]) ** 2) - Bot
             )
 
             dDhalf_dD = sdiag(1 / (dpred + Bot))
 
-            xterm = sdiag(box + bx) * self.Qfx
-            yterm = sdiag(boy + by) * self.Qfy
-            zterm = sdiag(boz + bz) * self.Qfz
+            xterm = sdiag(B0[0] + bx) * self._Qfx
+            yterm = sdiag(B0[1] + by) * self._Qfy
+            zterm = sdiag(B0[2] + bz) * self._Qfz
 
-            fields["tmi"] = dDhalf_dD * (xterm + yterm + zterm)
+            Qtmi = dDhalf_dD * (xterm + yterm + zterm)
 
+        rx_list = self.survey.source_field.receiver_list
+        n_total = 0
+        total_data_list = []
+        for rx in rx_list:
+            data = {}
+            rx_n_locs = rx.locations.shape[0]
+            if "bx" in rx.components:
+                data["bx"] = self._Qfx[n_total:n_total + rx_n_locs][:]
+            if "by" in rx.components:
+                data["by"] = self._Qfy[n_total:n_total + rx_n_locs][:]
+            if "bz" in rx.components:
+                data["bz"] = self._Qfz[n_total:n_total + rx_n_locs][:]
+            if "tmi" in rx.components:
+                data["tmi"] = Qtmi[n_total:n_total + rx_n_locs][:]
 
-        return sp.vstack([fields[comp] for comp in components])
+            n_total += rx_n_locs
+
+            total_data_list.append(sp.vstack([data[comp] for comp in rx.components]))
+
+        if len(total_data_list) == 1:
+            return total_data_list[0]
+
+        return sp.vstack(total_data_list)
 
     @property
     def _delete_on_model_update(self):
         toDelete = super()._delete_on_model_update
         if self._stored_fields is not None:
             toDelete = toDelete + ["_stored_fields"]
-        if self._Ainv is not None:
-            toDelete = toDelete + ["_Ainv"]
+        if self.muMap is not None:
+            if self._Ainv is not None:
+                toDelete = toDelete + ["_Ainv"]
         return toDelete
-
-    @property
-    def clean_on_model_update(self):
-        toclean = super().clean_on_model_update
-        if self.muMap is None:
-            return toclean
-        else:
-            return toclean + ["_Ainv"]
 
