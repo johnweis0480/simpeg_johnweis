@@ -600,6 +600,8 @@ def test_forward(model_type,mesh):
     dpred_numeric=simulation.dpred()
     dpred_analytic = mkvc(ellipsoid.anomalous_bfield(survey.receiver_locations))
 
+    assert np.allclose(dpred_numeric,dpred_analytic,rtol=.1,atol=.05*np.max(np.abs(dpred_analytic)))
+
     err = np.linalg.norm(dpred_numeric - dpred_analytic)/ np.linalg.norm(dpred_analytic)
 
     print("\n||dpred_analytic-dpred_numeric||/||dpred_analytic|| = "+"{:.{}f}".format(err, 2)+', tol = '+str(tol))

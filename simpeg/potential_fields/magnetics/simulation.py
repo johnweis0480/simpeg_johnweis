@@ -1525,7 +1525,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     Parameters
     ----------
     mesh : discretize.base.BaseMesh
-    survey : magnetics.suvey.Survey
+    survey : magnetics.survey.Survey
     mu : float, array_like
         Magnetic Permeability Model (H/ m). Set this for forward
         modeling or to fix while inverting for remanence. This is used if
@@ -1680,12 +1680,10 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             rhs += self._Div * self.MfMuiI * self._MfMu0i * self._B0 - self._Div * self._B0
 
         if self.rem is not None:
-            mu = self.mu * np.ones(self.mesh.n_cells)
-            mu_vec = np.hstack((mu, mu, mu))
             rhs += (
                 self._Div
                 * (
-                    self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)
+                    self.MfMuiI * self.mesh.get_face_inner_product(self.rem / np.tile(self.mu*np.ones(self.mesh.n_cells), self.mesh.dim))
                 ).diagonal()
             )
 
@@ -1716,10 +1714,8 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
                 B += self._MfMu0i * self.MfMuiI * self._B0 - self._B0
 
             if self.rem is not None:
-                mu = self.mu * np.ones(self.mesh.n_cells)
-                mu_vec = np.hstack((mu, mu, mu))
                 B += (
-                    self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)
+                    self.MfMuiI * self.mesh.get_face_inner_product(self.rem / np.tile(self.mu*np.ones(self.mesh.n_cells), self.mesh.dim))
                 ).diagonal()
 
             fields = {"B": B, "u": u}
@@ -1774,10 +1770,8 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             B += self._MfMu0i * self.MfMuiI * self._B0 - self._B0
 
         if self.rem is not None:
-            mu = self.mu * np.ones(self.mesh.n_cells)
-            mu_vec = np.hstack((mu, mu, mu))
             B += (
-                self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)
+                self.MfMuiI * self.mesh.get_face_inner_product(self.rem / np.tile(self.mu*np.ones(self.mesh.n_cells), self.mesh.dim))
             ).diagonal()
 
         mu0_H = -self._MfMu0iI * self._DivT * u
@@ -1847,8 +1841,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
 
         del Q
 
-        mu = np.ones(self.mesh.n_cells) * self.mu
-        mu_vec = np.hstack((mu, mu, mu))
+        mu_vec =np.tile(self.mu*np.ones(self.mesh.n_cells), self.mesh.dim)
 
         Jtv = 0
 
@@ -1893,8 +1886,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         db_dm = 0
         dCmu_dm = 0
 
-        mu = np.ones(self.mesh.n_cells) * self.mu
-        mu_vec = np.hstack((mu, mu, mu))
+        mu_vec = np.tile(self.mu*np.ones(self.mesh.n_cells), self.mesh.dim)
 
         if self.remMap is not None:
             Mf_rem_deriv = self._Mf_vec_deriv * sp.diags(1 / mu_vec) * self.remDeriv
